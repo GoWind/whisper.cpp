@@ -15,6 +15,7 @@ CXXV := $(shell $(CXX) --version | head -n 1)
 
 # Mac OS + Arm can report x86_64
 # ref: https://github.com/ggerganov/whisper.cpp/issues/66#issuecomment-1282546789
+# Gov's note: This is done 
 ifeq ($(UNAME_S),Darwin)
 	ifneq ($(UNAME_P),arm)
 		SYSCTL_M := $(shell sysctl -n hw.optional.arm64)
@@ -29,13 +30,14 @@ endif
 #
 # Compile flags
 #
-
+#Gov's note, this is done
 CFLAGS   = -I.              -O3 -DNDEBUG -std=c11   -fPIC
 CXXFLAGS = -I. -I./examples -O3 -DNDEBUG -std=c++11 -fPIC
 LDFLAGS  =
 
 # OS specific
 # TODO: support Windows
+# Gov's note, this is done
 ifeq ($(UNAME_S),Linux)
 	CFLAGS   += -pthread
 	CXXFLAGS += -pthread
@@ -179,9 +181,11 @@ default: main
 #
 
 ggml.o: ggml.c ggml.h
+	@echo "cflags is $(CFLAGS)"
 	$(CC)  $(CFLAGS)   -c ggml.c -o ggml.o
 
 whisper.o: whisper.cpp whisper.h
+	@echo "cxxflags is $(CXXFLAGS)"
 	$(CXX) $(CXXFLAGS) -c whisper.cpp -o whisper.o
 
 libwhisper.a: ggml.o whisper.o
@@ -203,6 +207,7 @@ SRC_COMMON = examples/common.cpp
 SRC_COMMON_SDL = examples/common-sdl.cpp
 
 main: examples/main/main.cpp $(SRC_COMMON) ggml.o whisper.o
+	@echo "LDFLAGS when building main: $(LDFLAGS)"
 	$(CXX) $(CXXFLAGS) examples/main/main.cpp $(SRC_COMMON) ggml.o whisper.o -o main $(LDFLAGS)
 	./main -h
 
