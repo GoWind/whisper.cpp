@@ -1,27 +1,92 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-pub fn build(b: *std.build.Builder) void {
-    if (falseMacx86_64()) {
-        std.debug.print("Your arch is announced as x86_64, but it seems to actually be ARM64. Not fixing that can lead to bad performance. For more info see: https://github.com/ggerganov/whisper.cpp/issues/66#issuecomment-1282546789\n", .{});
-        return;
-    }
-
-    // var default_c_flags = .{ "-I.", "-O3", "-std=c11", "-fPIC", "-pthread" };
-    // var default_cpp_flags = .{ "-I.", "-I./examples", "-O3", "-std=c++11", "-fPIC", "-pthread" };
+pub fn build(b: *std.build.Builder) !void {
+    var basic_cflags = [_][]const u8{ "-I.", "-O3", "-std=c11", "-fPIC", "-pthread" };
+    var basic_cppflags = .{ "-I.", "-I./examples", "-O3", "-std=c++11", "-fPIC", "-pthread" };
+    var alloc = b.allocator;
+    var c_flags = std.ArrayList([]const u8).init(alloc);
+    var cpp_flags = std.ArrayList([]const u8).init(alloc);
+    defer c_flags.deinit();
+    defer cpp_flags.deinit();
+    try c_flags.appendSlice(&basic_cflags);
+    try cpp_flags.appendSlice(&basic_cppflags);
     // var ld_flags = [_][]const u8{};
 
     const target = b.standardTargetOptions(.{});
 
-    var target_cpu = target.getCpuArch();
-    if (target_cpu.isX86()) {
-        std.debug.print("all features\n {any}\n", .{target_cpu.allFeaturesList()});
-    } else if (target_cpu.isAARCH64()) {
-        var all_features = target_cpu.allFeaturesList();
-        for (all_features) |feature| {
-            std.debug.print("feature: {s}\n", .{feature.name});
+    var target_cpu = builtin.cpu;
+    var all_features = target_cpu.features;
+    if (target_cpu.arch.isX86()) {
+        const x86_target = std.Target.x86;
+        if (x86_target.featureSetHas(all_features, x86_target.Feature.f16c)) {
+            try c_flags.append("-mf16c");
         }
-    } else {}
+        if (x86_target.featureSetHas(all_features, x86_target.Feature.fma)) {
+            try c_flags.append("-mfma");
+        }
+
+        if (x86_target.featureSetHas(all_features, x86_target.Feature.avx)) {
+            try c_flags.append("-mavx");
+        }
+
+        if (x86_target.featureSetHas(all_features, x86_target.Feature.avx2)) {
+            try c_flags.append("-mavx2");
+        }
+
+        if (x86_target.featureSetHas(all_features, x86_target.Feature.sse3)) {
+            try c_flags.append("-msse3");
+        }
+    }
+    if (target_cpu.arch.isPPC64()) {
+        const ppc64_target = std.Target.powerpc;
+        if (ppc64_target.featureSetHas(all_features, ppc64_target.Feature.power9_vector)) {
+            try c_flags.append("-mpower9-vector");
+        }
+        try cpp_flags.append("-std=c++23");
+        try cpp_flags.append("-DGGML_BIG_ENDIAN");
+    }
+
+    //TODO: How do I get arbitrary flags here
+    var maybe_use_accelerate = b.option(bool, "macos_accelerate", "use the accelerate framework in macOS (if available) for ML models");
+    if (maybe_use_accelerate) |use_accelerate| {
+        if (use_accelerate) {
+            try c_flags.append("-DGGML_USE_ACCELERATE");
+        }
+    }
+
+    var maybe_use_openblas = b.option(bool, "use_openblas", "use open BLAS when available");
+    if (maybe_use_openblas) |use_openblas| {
+        if (use_openblas) {
+            try c_flags.appendSlice(&.{ "-DGGML_USE_OPENBLAS", "-I/usr/local/include/openblas" });
+        }
+    }
+    var maybe_use_gprof = b.option(bool, "gprof", "use gnu prof");
+    if (maybe_use_gprof) |use_gprof| {
+        if (use_gprof) {
+            try c_flags.append("-pg");
+            try cpp_flags.append("-pg");
+        }
+    }
+
+    if (!target_cpu.arch.isAARCH64()) {
+        try c_flags.append("-mcpu=native");
+        try cpp_flags.append("-mcpu=native");
+    }
+
+    if (target_cpu.arch.isARM()) {
+        if (!std.mem.startsWith(u8, target_cpu.model.name, "armv6")) {
+            try c_flags.appendSlice(&.{ "-mfpu=neon-fp-armv8", "-mfp16-format=ieee", "-mno-unaligned-access" });
+        }
+        if (!std.mem.startsWith(u8, target_cpu.model.name, "armv7")) {
+            try c_flags.appendSlice(&.{ "-mfpu=neon-fp-armv8", "-mfp16-format=ieee", "-mno-unaligned-access", "-funsafe-math-optimizations" });
+        }
+
+        if (!std.mem.startsWith(u8, target_cpu.model.name, "armv8")) {
+            try c_flags.appendSlice(&.{ "-mfp16-format=ieee", "-mno-unaligned-access" });
+        }
+    }
+    //TODO: Flags for accelerate, aarch64, arm and rpi
     const optimize = b.standardOptimizeOption(.{});
     const ggmlObject = b.addObject(.{
         .name = "ggml.o",
@@ -32,20 +97,20 @@ pub fn build(b: *std.build.Builder) void {
     ggmlObject.addIncludePath("/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include");
     ggmlObject.addCSourceFiles(&.{
         "ggml.c",
-    },
-    //-O3 -DNDEBUG -std=c11   -fPIC -pthread -DGGML_USE_ACCELERATE
-    &.{
-        "-std=c11",
-        "-O3",
-        "-DNDEBUG",
-        "-fPIC",
-        "-pthread",
-        "-DGGML_USE_ACCELERATE",
-    });
+    }, c_flags.items);
     // We just need the header files for the Accelerate Framework for creating the
     // object file
     // The main file step will use the dynamic library to link
-    ggmlObject.linkFramework("Accelerate");
+    if (maybe_use_accelerate) |use_accelerate| {
+        if (use_accelerate) {
+            ggmlObject.linkFramework("Accelerate");
+        }
+    }
+    if (maybe_use_openblas) |open_blas| {
+        if (open_blas) {
+            ggmlObject.linkSystemLibraryName("openblas");
+        }
+    }
     ggmlObject.linkLibC();
 
     var cxxFlags = &.{ "-O3", "-DNDEBUG", "-std=c++11", "-fPIC", "-pthread" };
@@ -74,19 +139,4 @@ pub fn build(b: *std.build.Builder) void {
     mainFile.addObject(ggmlObject);
     mainFile.linkFramework("Accelerate");
     b.installArtifact(mainFile);
-}
-
-pub fn falseMacx86_64() bool {
-    if (builtin.target.isDarwin()) {
-        var opt_cpu: i32 = 0;
-        var len: usize = 4;
-        _ = std.os.darwin.sysctlbyname("hw.optional.cpu", &opt_cpu, &len, null, 0);
-        if (opt_cpu == 1) {
-            return true;
-        } else {
-            return false;
-        }
-    } else {
-        return false;
-    }
 }
